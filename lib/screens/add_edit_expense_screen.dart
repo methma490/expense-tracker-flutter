@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/expense.dart';
 import '../models/expense_category.dart';
+import '../services/expense_service.dart';
 
 class AddEditExpenseScreen extends StatefulWidget {
   final Expense? expense;
@@ -16,16 +17,19 @@ class AddEditExpenseScreen extends StatefulWidget {
       _AddEditExpenseScreenState();
 }
 
-class _AddEditExpenseScreenState
-    extends State<AddEditExpenseScreen> {
+class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
   final _formKey = GlobalKey<FormState>();
 
   final _titleController = TextEditingController();
   final _amountController = TextEditingController();
   final _noteController = TextEditingController();
 
+  final ExpenseService _expenseService = ExpenseService();
+
   ExpenseCategory _selectedCategory = ExpenseCategory.food;
   DateTime _selectedDate = DateTime.now();
+
+  bool _isSaving = false;
 
   bool get _isEditing => widget.expense != null;
 
@@ -67,10 +71,14 @@ class _AddEditExpenseScreenState
     }
   }
 
-  void _saveExpense() {
+  Future<void> _saveExpense() async {
     if (!_formKey.currentState!.validate()) {
       return;
     }
+
+    setState(() {
+      _isSaving = true;
+    });
 
     final expense = Expense(
       id: widget.expense?.id ?? '',
@@ -83,7 +91,33 @@ class _AddEditExpenseScreenState
           : _noteController.text.trim(),
     );
 
-    Navigator.pop(context, expense);
+    try {
+      if (_isEditing) {
+        await _expenseService.updateExpense(expense);
+      } else {
+        await _expenseService.addExpense(expense);
+      }
+
+      if (!mounted) return;
+
+      Navigator.pop(context);
+    } catch (error) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Unable to save expense. Please try again.',
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+        });
+      }
+    }
   }
 
   @override
@@ -171,18 +205,20 @@ class _AddEditExpenseScreenState
                       child: Text(category.displayName),
                     );
                   }).toList(),
-                  onChanged: (category) {
-                    if (category != null) {
-                      setState(() {
-                        _selectedCategory = category;
-                      });
-                    }
-                  },
+                  onChanged: _isSaving
+                      ? null
+                      : (category) {
+                          if (category != null) {
+                            setState(() {
+                              _selectedCategory = category;
+                            });
+                          }
+                        },
                 ),
                 const SizedBox(height: 16),
 
                 InkWell(
-                  onTap: _selectDate,
+                  onTap: _isSaving ? null : _selectDate,
                   borderRadius: BorderRadius.circular(4),
                   child: InputDecorator(
                     decoration: const InputDecoration(
@@ -216,12 +252,22 @@ class _AddEditExpenseScreenState
                 SizedBox(
                   height: 52,
                   child: FilledButton.icon(
-                    onPressed: _saveExpense,
-                    icon: const Icon(Icons.save_outlined),
+                    onPressed: _isSaving ? null : _saveExpense,
+                    icon: _isSaving
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const Icon(Icons.save_outlined),
                     label: Text(
-                      _isEditing
-                          ? 'Update Expense'
-                          : 'Save Expense',
+                      _isSaving
+                          ? 'Saving...'
+                          : _isEditing
+                              ? 'Update Expense'
+                              : 'Save Expense',
                     ),
                   ),
                 ),
