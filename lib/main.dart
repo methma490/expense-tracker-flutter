@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import 'screens/home_screen.dart';
 
 void main() {
@@ -18,6 +19,9 @@ class ExpenseTrackerApp extends StatelessWidget {
           seedColor: Colors.indigo,
         ),
         useMaterial3: true,
+        inputDecorationTheme: const InputDecorationTheme(
+          filled: true,
+        ),
       ),
       home: const HomeScreen(),
     );
