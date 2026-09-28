@@ -33,6 +33,7 @@ class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
 
   ExpenseCategory _selectedCategory = ExpenseCategory.food;
   late DateTime _selectedDate;
+  late final String _newExpenseId;
 
   bool _isSaving = false;
 
@@ -41,6 +42,10 @@ class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
   @override
   void initState() {
     super.initState();
+
+    // Allocate this once, rather than inside _saveExpense. If a save has to be
+    // retried, it targets the same Firestore document.
+    _newExpenseId = _isEditing ? '' : _expenseService.createExpenseId();
 
     final expense = widget.expense;
 
@@ -100,6 +105,10 @@ class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
   // ------------------------------------------------------------
 
   Future<void> _saveExpense() async {
+    // setState does not rebuild the button until the next frame, so a very
+    // quick double-tap could otherwise start two Firestore writes.
+    if (_isSaving) return;
+
     if (!_formKey.currentState!.validate()) {
       return;
     }
@@ -112,7 +121,7 @@ class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
     final timeSource = widget.expense?.date ?? DateTime.now();
 
     final expense = Expense(
-      id: widget.expense?.id ?? '',
+      id: widget.expense?.id ?? _newExpenseId,
       title: _titleController.text.trim(),
       amount: double.parse(_amountController.text.trim().replaceAll(',', '')),
       category: _selectedCategory,
@@ -129,18 +138,9 @@ class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
     );
 
     try {
-      final write = _isEditing
+      await (_isEditing
           ? _expenseService.updateExpense(expense)
-          : _expenseService.addExpense(expense);
-
-      // Offline, Firestore queues the write locally and syncs later, but the
-      // Future only completes once the server confirms. Don't make the user
-      // stare at a spinner: after 3s treat it as saved (queued).
-      // Real errors (e.g. permission denied) still arrive quickly and are caught.
-      await write.timeout(
-        const Duration(seconds: 3),
-        onTimeout: () {},
-      );
+          : _expenseService.addExpense(expense));
 
       if (!mounted) return;
 

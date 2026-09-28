@@ -20,8 +20,21 @@ class ExpenseService {
   }
 
   // CREATE
+  /// Allocates an ID before saving so a retry from the same form writes to the
+  /// same document instead of creating another expense.
+  String createExpenseId() => _expenses.doc().id;
+
   Future<void> addExpense(Expense expense) async {
-    await _expenses.add(expense.toMap());
+    if (expense.id.isEmpty) {
+      throw ArgumentError(
+        'Expense ID cannot be empty when adding an expense.',
+      );
+    }
+
+    // Do not use CollectionReference.add here. `add` generates a new document
+    // ID on every call, so a retry can create a duplicate expense. A stable ID
+    // assigned by the form makes the write idempotent.
+    await _expenses.doc(expense.id).set(expense.toMap());
   }
 
   // UPDATE
