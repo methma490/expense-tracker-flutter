@@ -1,9 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/expense.dart';
 import '../models/expense_category.dart';
 import '../services/expense_service.dart';
+import '../utils/formatters.dart';
 
+/// Pops with:
+///  'added'   -> a new expense was saved
+///  'updated' -> an existing expense was saved
+///  'delete'  -> user asked to delete (HomeScreen performs the delete + undo)
 class AddEditExpenseScreen extends StatefulWidget {
   final Expense? expense;
 
@@ -13,8 +19,7 @@ class AddEditExpenseScreen extends StatefulWidget {
   });
 
   @override
-  State<AddEditExpenseScreen> createState() =>
-      _AddEditExpenseScreenState();
+  State<AddEditExpenseScreen> createState() => _AddEditExpenseScreenState();
 }
 
 class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
@@ -27,7 +32,7 @@ class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
   final ExpenseService _expenseService = ExpenseService();
 
   ExpenseCategory _selectedCategory = ExpenseCategory.food;
-  DateTime _selectedDate = DateTime.now();
+  late DateTime _selectedDate;
 
   bool _isSaving = false;
 
@@ -41,10 +46,12 @@ class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
 
     if (expense != null) {
       _titleController.text = expense.title;
-      _amountController.text = expense.amount.toString();
+      _amountController.text = expense.amount.toStringAsFixed(2);
       _noteController.text = expense.note ?? '';
       _selectedCategory = expense.category;
-      _selectedDate = expense.date;
+      _selectedDate = DateUtils.dateOnly(expense.date);
+    } else {
+      _selectedDate = DateUtils.dateOnly(DateTime.now());
     }
   }
 
@@ -56,20 +63,41 @@ class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
     super.dispose();
   }
 
+  // ------------------------------------------------------------
+  // DATE
+  // ------------------------------------------------------------
+
+  bool get _isToday =>
+      DateUtils.isSameDay(_selectedDate, DateTime.now());
+
+  bool get _isYesterday => DateUtils.isSameDay(
+        _selectedDate,
+        DateTime.now().subtract(const Duration(days: 1)),
+      );
+
   Future<void> _selectDate() async {
+    final earliest = DateTime(2020);
+    final today = DateUtils.dateOnly(DateTime.now());
+
+    // firstDate/lastDate are widened if needed so initialDate is always valid
+    // (otherwise editing an old or future-dated expense would crash).
     final pickedDate = await showDatePicker(
       context: context,
       initialDate: _selectedDate,
-      firstDate: DateTime(2020),
-      lastDate: DateTime.now(),
+      firstDate: _selectedDate.isBefore(earliest) ? _selectedDate : earliest,
+      lastDate: _selectedDate.isAfter(today) ? _selectedDate : today,
     );
 
     if (pickedDate != null) {
       setState(() {
-        _selectedDate = pickedDate;
+        _selectedDate = DateUtils.dateOnly(pickedDate);
       });
     }
   }
+
+  // ------------------------------------------------------------
+  // SAVE
+  // ------------------------------------------------------------
 
   Future<void> _saveExpense() async {
     if (!_formKey.currentState!.validate()) {
@@ -80,35 +108,49 @@ class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
       _isSaving = true;
     });
 
+    // Keep a time-of-day so expenses on the same day stay in order.
+    final timeSource = widget.expense?.date ?? DateTime.now();
+
     final expense = Expense(
       id: widget.expense?.id ?? '',
       title: _titleController.text.trim(),
-      amount: double.parse(_amountController.text.trim()),
+      amount: double.parse(_amountController.text.trim().replaceAll(',', '')),
       category: _selectedCategory,
-      date: _selectedDate,
+      date: DateTime(
+        _selectedDate.year,
+        _selectedDate.month,
+        _selectedDate.day,
+        timeSource.hour,
+        timeSource.minute,
+      ),
       note: _noteController.text.trim().isEmpty
           ? null
           : _noteController.text.trim(),
     );
 
     try {
-      if (_isEditing) {
-        await _expenseService.updateExpense(expense);
-      } else {
-        await _expenseService.addExpense(expense);
-      }
+      final write = _isEditing
+          ? _expenseService.updateExpense(expense)
+          : _expenseService.addExpense(expense);
+
+      // Offline, Firestore queues the write locally and syncs later, but the
+      // Future only completes once the server confirms. Don't make the user
+      // stare at a spinner: after 3s treat it as saved (queued).
+      // Real errors (e.g. permission denied) still arrive quickly and are caught.
+      await write.timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {},
+      );
 
       if (!mounted) return;
 
-      Navigator.pop(context);
+      Navigator.pop(context, _isEditing ? 'updated' : 'added');
     } catch (error) {
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text(
-            'Unable to save expense. Please try again.',
-          ),
+          content: Text('Unable to save expense. Please try again.'),
         ),
       );
     } finally {
@@ -120,31 +162,145 @@ class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
     }
   }
 
+  // ------------------------------------------------------------
+  // DELETE
+  // ------------------------------------------------------------
+
+  Future<void> _confirmDelete() async {
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Delete Expense'),
+          content: Text(
+            'Are you sure you want to delete "${widget.expense!.title}"?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (shouldDelete != true || !mounted) return;
+
+    Navigator.pop(context, 'delete');
+  }
+
+  // ------------------------------------------------------------
+  // UI
+  // ------------------------------------------------------------
+
+  Widget _sectionLabel(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Text(
+        text,
+        style: Theme.of(context)
+            .textTheme
+            .titleSmall
+            ?.copyWith(fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          _isEditing ? 'Edit Expense' : 'Add Expense',
-        ),
+        title: Text(_isEditing ? 'Edit Expense' : 'Add Expense'),
+        actions: [
+          if (_isEditing)
+            IconButton(
+              tooltip: 'Delete expense',
+              onPressed: _isSaving ? null : _confirmDelete,
+              icon: Icon(Icons.delete_outline, color: colorScheme.error),
+            ),
+        ],
       ),
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(20),
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           child: Form(
             key: _formKey,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // AMOUNT (big, first)
+                TextFormField(
+                  controller: _amountController,
+                  autofocus: !_isEditing,
+                  enabled: !_isSaving,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: 'Amount',
+                    hintText: '0.00',
+                    prefixText: 'Rs. ',
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 20,
+                    ),
+                  ),
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(
+                      RegExp(r'^\d*\.?\d{0,2}'),
+                    ),
+                  ],
+                  textInputAction: TextInputAction.next,
+                  validator: (value) {
+                    if (value == null || value.trim().isEmpty) {
+                      return 'Please enter an amount';
+                    }
+
+                    final amount = double.tryParse(
+                      value.trim().replaceAll(',', ''),
+                    );
+
+                    if (amount == null) {
+                      return 'Please enter a valid number';
+                    }
+
+                    if (amount <= 0) {
+                      return 'Amount must be greater than 0';
+                    }
+
+                    if (amount > 100000000) {
+                      return 'Amount is too large';
+                    }
+
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 20),
+
+                // TITLE
                 TextFormField(
                   controller: _titleController,
+                  enabled: !_isSaving,
+                  textCapitalization: TextCapitalization.sentences,
                   decoration: const InputDecoration(
                     labelText: 'Title',
                     hintText: 'e.g. Lunch',
-                    border: OutlineInputBorder(),
                     prefixIcon: Icon(Icons.title),
                   ),
-                  textInputAction: TextInputAction.next,
+                  textInputAction: TextInputAction.done,
                   validator: (value) {
                     if (value == null || value.trim().isEmpty) {
                       return 'Please enter a title';
@@ -157,98 +313,102 @@ class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
                     return null;
                   },
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 20),
 
-                TextFormField(
-                  controller: _amountController,
-                  decoration: const InputDecoration(
-                    labelText: 'Amount',
-                    hintText: 'e.g. 1250.00',
-                    border: OutlineInputBorder(),
-                    prefixText: 'Rs. ',
-                    prefixIcon: Icon(Icons.payments_outlined),
-                  ),
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                  ),
-                  textInputAction: TextInputAction.next,
-                  validator: (value) {
-                    if (value == null || value.trim().isEmpty) {
-                      return 'Please enter an amount';
-                    }
-
-                    final amount = double.tryParse(value.trim());
-
-                    if (amount == null) {
-                      return 'Please enter a valid number';
-                    }
-
-                    if (amount <= 0) {
-                      return 'Amount must be greater than 0';
-                    }
-
-                    return null;
-                  },
+                // CATEGORY (chips instead of dropdown)
+                _sectionLabel('Category'),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final category in ExpenseCategory.values)
+                      ChoiceChip(
+                        avatar: Icon(
+                          category.icon,
+                          size: 18,
+                          color: _selectedCategory == category
+                              ? null
+                              : category.color,
+                        ),
+                        label: Text(category.displayName),
+                        selected: _selectedCategory == category,
+                        onSelected: _isSaving
+                            ? null
+                            : (_) {
+                                setState(() {
+                                  _selectedCategory = category;
+                                });
+                              },
+                      ),
+                  ],
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 20),
 
-                DropdownButtonFormField<ExpenseCategory>(
-                  initialValue: _selectedCategory,
-                  decoration: const InputDecoration(
-                    labelText: 'Category',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.category_outlined),
-                  ),
-                  items: ExpenseCategory.values.map((category) {
-                    return DropdownMenuItem(
-                      value: category,
-                      child: Text(category.displayName),
-                    );
-                  }).toList(),
-                  onChanged: _isSaving
-                      ? null
-                      : (category) {
-                          if (category != null) {
-                            setState(() {
-                              _selectedCategory = category;
-                            });
-                          }
-                        },
-                ),
-                const SizedBox(height: 16),
-
-                InkWell(
-                  onTap: _isSaving ? null : _selectDate,
-                  borderRadius: BorderRadius.circular(4),
-                  child: InputDecorator(
-                    decoration: const InputDecoration(
-                      labelText: 'Date',
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.calendar_month_outlined),
+                // DATE (quick chips + picker)
+                _sectionLabel('Date'),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    ChoiceChip(
+                      label: const Text('Today'),
+                      selected: _isToday,
+                      onSelected: _isSaving
+                          ? null
+                          : (_) {
+                              setState(() {
+                                _selectedDate =
+                                    DateUtils.dateOnly(DateTime.now());
+                              });
+                            },
                     ),
-                    child: Text(
-                      '${_selectedDate.day.toString().padLeft(2, '0')}/'
-                      '${_selectedDate.month.toString().padLeft(2, '0')}/'
-                      '${_selectedDate.year}',
+                    ChoiceChip(
+                      label: const Text('Yesterday'),
+                      selected: _isYesterday,
+                      onSelected: _isSaving
+                          ? null
+                          : (_) {
+                              setState(() {
+                                _selectedDate = DateUtils.dateOnly(
+                                  DateTime.now()
+                                      .subtract(const Duration(days: 1)),
+                                );
+                              });
+                            },
                     ),
-                  ),
+                    ActionChip(
+                      avatar: const Icon(
+                        Icons.calendar_month_outlined,
+                        size: 18,
+                      ),
+                      label: Text(
+                        _isToday || _isYesterday
+                            ? 'Pick date'
+                            : Formatters.date(_selectedDate),
+                      ),
+                      onPressed: _isSaving ? null : _selectDate,
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 20),
 
+                // NOTE
                 TextFormField(
                   controller: _noteController,
+                  enabled: !_isSaving,
+                  textCapitalization: TextCapitalization.sentences,
                   decoration: const InputDecoration(
                     labelText: 'Note (Optional)',
                     hintText: 'Add a description',
-                    border: OutlineInputBorder(),
                     prefixIcon: Icon(Icons.notes),
                     alignLabelWithHint: true,
                   ),
-                  maxLines: 4,
+                  maxLines: 3,
                   maxLength: 250,
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 16),
 
+                // SAVE
                 SizedBox(
                   height: 52,
                   child: FilledButton.icon(
@@ -257,11 +417,9 @@ class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
                         ? const SizedBox(
                             width: 20,
                             height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                            ),
+                            child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Icon(Icons.save_outlined),
+                        : const Icon(Icons.check),
                     label: Text(
                       _isSaving
                           ? 'Saving...'

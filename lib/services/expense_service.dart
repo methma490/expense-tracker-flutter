@@ -52,4 +52,16 @@ class ExpenseService {
 
     await _expenses.doc(id).delete();
   }
+
+  // UNDO DELETE
+  // Re-creates a deleted expense using its original document ID.
+  Future<void> restoreExpense(Expense expense) async {
+    if (expense.id.isEmpty) {
+      throw ArgumentError(
+        'Expense ID cannot be empty when restoring an expense.',
+      );
+    }
+
+    await _expenses.doc(expense.id).set(expense.toMap());
+  }
 }
